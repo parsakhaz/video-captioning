@@ -5,6 +5,8 @@
 > **💡 NOTE:** This project offers two options for the LLaMA model:
 > 1. Local Ollama LLaMA (Recommended)
 > 2. HuggingFace LLaMA (Requires approval)
+>
+> **⚠️ AUTHENTICATION:** When using HuggingFace authentication, make sure to use a token with "WRITE" permission, not "FINEGRAINED" permission. If you encounter authorization issues despite having model access, generate a new token with "WRITE" permission.
 
 ## Table of Contents
 
@@ -68,10 +70,14 @@ A Python script that automatically generates captions for videos using Moondream
 ```bash
 # Linux/macOS
 sudo apt-get update
-sudo apt-get install ffmpeg
+sudo apt-get install ffmpeg libvips libvips-dev
+
+# For macOS with Homebrew
+brew install ffmpeg vips
 
 # Windows
-# Download and install FFmpeg from https://ffmpeg.org/download.html
+# 1. Download and install FFmpeg from https://ffmpeg.org/download.html
+# 2. Download and install libvips from https://github.com/libvips/build-win64/releases
 ```
 
 ### Python Dependencies
