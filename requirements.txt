@@ -1,0 +1,9 @@
+opencv-python
+Pillow
+transformers
+torch
+einops
+pyvips
+typing
+ollama
+accelerate
