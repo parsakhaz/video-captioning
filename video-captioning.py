@@ -1,186 +1,32 @@
 import cv2
 import os
-import platform
-import subprocess
-import sys
+import torch
 from PIL import Image
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
-import torch
-from typing import Union
+from typing import Union, List
 import warnings
 import argparse
 from huggingface_hub import login, whoami
-import requests
 import json
-import tempfile
 import shutil
-from pathlib import Path
-import time
+import gc
+from datetime import datetime
+import re
+
+# Configure PyTorch memory allocation
+torch.cuda.empty_cache()
+gc.collect()
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+
+# Clean up any existing frames at startup
+if os.path.exists("vidframes"):
+    shutil.rmtree("vidframes")
+
 warnings.filterwarnings('ignore')
 
 # Define paths
 INPUT_FOLDER = "./inputs"
 OUTPUT_FOLDER = "vidframes"
-
-# Ollama wrapper class for consistent API
-class OllamaWrapper:
-    def __call__(self, messages, **kwargs):
-        prompt = messages[1]["content"]  # Get user content from messages
-        response = requests.post(
-            "http://localhost:11434/api/generate",
-            json={
-                "model": "llama3.2:1b",
-                "prompt": f"Summarize and arrange these image captions into one flowing narrative, return the narrative only, do not include any other text: {prompt}",
-                "stream": False
-            }
-        )
-        return [{"generated_text": response.json()["response"]}]
-
-def get_os_type():
-    """Determine the OS type."""
-    system = platform.system().lower()
-    if system == "darwin":
-        return "mac"
-    elif system == "windows":
-        return "windows"
-    else:
-        return "linux"
-
-def install_ollama():
-    """Install Ollama based on the OS."""
-    os_type = get_os_type()
-    print(f"\nDetected OS: {os_type.capitalize()}")
-    print("Attempting to install Ollama...")
-
-    try:
-        if os_type == "mac":
-            # macOS installation using Homebrew
-            try:
-                subprocess.run(["brew", "--version"], check=True, capture_output=True)
-            except:
-                print("Homebrew not found. Installing Homebrew...")
-                subprocess.run(['/bin/bash', '-c', '$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)'])
-            
-            print("Installing Ollama via Homebrew...")
-            subprocess.run(["brew", "install", "ollama"])
-
-        elif os_type == "linux":
-            # Linux installation using curl
-            print("Installing Ollama via curl...")
-            install_cmd = 'curl https://ollama.ai/install.sh | sh'
-            subprocess.run(install_cmd, shell=True, check=True)
-
-        elif os_type == "windows":
-            # Windows installation using official MSI
-            print("Downloading Ollama installer...")
-            temp_dir = tempfile.mkdtemp()
-            installer_path = os.path.join(temp_dir, "ollama-installer.msi")
-            
-            response = requests.get("https://ollama.ai/download/windows", stream=True)
-            with open(installer_path, 'wb') as f:
-                shutil.copyfileobj(response.raw, f)
-
-            print("Installing Ollama...")
-            subprocess.run(['msiexec', '/i', installer_path, '/quiet'], check=True)
-            shutil.rmtree(temp_dir)
-
-        print("Ollama installation completed!")
-        
-    except Exception as e:
-        print(f"\nError installing Ollama: {str(e)}")
-        print("\nPlease install Ollama manually:")
-        print("1. Visit https://ollama.ai")
-        print("2. Download and install the appropriate version for your OS")
-        print("3. Run the script again after installation")
-        raise Exception("Ollama installation failed")
-
-def start_ollama_service():
-    """Start the Ollama service based on OS."""
-    os_type = get_os_type()
-    
-    try:
-        if os_type == "windows":
-            # Check if service is running
-            try:
-                requests.get("http://localhost:11434/api/tags")
-                return  # Service is running
-            except:
-                # Start Ollama service
-                subprocess.Popen(['ollama', 'serve'], 
-                               creationflags=subprocess.CREATE_NEW_CONSOLE)
-        else:  # Linux and Mac
-            try:
-                requests.get("http://localhost:11434/api/tags")
-                return  # Service is running
-            except:
-                # Start Ollama service
-                subprocess.Popen(['ollama', 'serve'])
-        
-        # Wait for service to start
-        print("Starting Ollama service...")
-        max_retries = 10
-        for i in range(max_retries):
-            try:
-                requests.get("http://localhost:11434/api/tags")
-                print("Ollama service started successfully!")
-                return
-            except:
-                if i < max_retries - 1:
-                    print(f"Waiting for service to start... ({i+1}/{max_retries})")
-                    time.sleep(2)
-                else:
-                    raise Exception("Service failed to start")
-                
-    except Exception as e:
-        print(f"\nError starting Ollama service: {str(e)}")
-        print("Please start Ollama manually and try again")
-        raise
-
-def pull_llama_model():
-    """Pull the LLaMA model in Ollama."""
-    print("\nPulling LLaMA model...")
-    try:
-        subprocess.run(['ollama', 'pull', 'llama3.2:1b'], check=True)
-        print("LLaMA model pulled successfully!")
-    except Exception as e:
-        print(f"\nError pulling LLaMA model: {str(e)}")
-        raise
-
-def setup_ollama():
-    """Setup and verify Ollama LLaMA."""
-    print("\nChecking Ollama setup...")
-    
-    try:
-        # Check if Ollama is installed
-        subprocess.run(['ollama', '--version'], capture_output=True, check=True)
-    except:
-        install_ollama()
-    
-    # Start Ollama service
-    start_ollama_service()
-    
-    # Check if model exists
-    response = requests.get("http://localhost:11434/api/tags")
-    if response.status_code == 200:
-        models = response.json()
-        if not any(model["name"].startswith("llama3.2:1b") for model in models["models"]):
-            pull_llama_model()
-    else:
-        pull_llama_model()
-    
-    print("Ollama LLaMA model ready!")
-
-def get_model_choice():
-    """Let user choose between HuggingFace and Ollama LLaMA."""
-    print("\nChoose LLaMA model source:")
-    print("1. Local Ollama LLaMA (Recommended, requires Ollama installed)")
-    print("2. HuggingFace LLaMA (Requires approved access)")
-    
-    while True:
-        choice = input("\nEnter choice (1 or 2): ").strip()
-        if choice in ['1', '2']:
-            return choice
-        print("Invalid choice. Please enter 1 or 2.")
 
 def setup_authentication(token: str = None):
     """Setup HuggingFace authentication either via web UI or token."""
@@ -188,7 +34,7 @@ def setup_authentication(token: str = None):
     print("This is required to access the LLaMA model for narrative generation.")
     print("Note: You must have been granted access to Meta's LLaMA model.")
     print("      If you haven't requested access yet, visit:")
-    print("      https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct")
+    print("      https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct")
     
     try:
         if token:
@@ -218,7 +64,7 @@ def setup_authentication(token: str = None):
         print("Make sure you have:")
         print("1. A HuggingFace account")
         print("2. Requested and been granted access to Meta's LLaMA model")
-        print("   Visit: https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct")
+        print("   Visit: https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct")
         print("   Note: The approval process may take several days")
         print("3. Either:")
         print("   - Run 'huggingface-cli login' in your terminal")
@@ -227,32 +73,17 @@ def setup_authentication(token: str = None):
         if "Cannot access gated repo" in str(e) or "awaiting a review" in str(e):
             print("\nError: You don't have access to the LLaMA model yet.")
             print("Please request access and wait for approval before using this script.")
-            print("Alternatively, you can use the local Ollama LLaMA option.")
-        else:
-            print("\nError details:", str(e))
         raise
-
-def check_ollama():
-    """Check if Ollama is running and has LLaMA model."""
-    try:
-        response = requests.get("http://localhost:11434/api/tags")
-        if response.status_code != 200:
-            return False
-        
-        models = response.json()
-        return any(model["name"].startswith("llama3.2:1b") for model in models["models"])
-    except:
-        return False
 
 def extract_frames(
     video_path: Union[str, os.PathLike],
     output_folder: str = OUTPUT_FOLDER,
-    frame_interval: float = 1.0,
+    frame_interval: float = 0.67,
     total_frames: int = None
 ) -> tuple:
     """Extract frames and record their timestamps."""
     os.makedirs(output_folder, exist_ok=True)
-    
+
     video = cv2.VideoCapture(video_path)
     fps = video.get(cv2.CAP_PROP_FPS)
     total_video_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -271,7 +102,7 @@ def extract_frames(
     frame_count = 0
     frames_saved = 0
     timestamps = []
-    
+
     while True:
         success, frame = video.read()
         if not success:
@@ -282,39 +113,42 @@ def extract_frames(
             cv2.imwrite(frame_filename, frame)
             timestamps.append(frame_count / fps)
             frames_saved += 1
-        
+
         frame_count += 1
-    
+
     video.release()
     print(f"Extracted {frames_saved} frames from video")
     return output_folder, timestamps
 
-def load_models(use_ollama: bool = False) -> tuple:
-    """Load the Moondream and LLama models."""
-    print('Loading models...')
+def load_moondream() -> AutoModelForCausalLM:
+    """Load just the Moondream model."""
+    print('Loading Moondream model...')
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
     
-    # Load Moondream model with latest revision
-    moondream_model = AutoModelForCausalLM.from_pretrained(
+    model = AutoModelForCausalLM.from_pretrained(
         "vikhyatk/moondream2",
         revision="2025-01-09",
         trust_remote_code=True,
-        # Uncomment to run on GPU
-        device_map={"": "cuda"}
-    )
+        torch_dtype=torch.float16,
+        low_cpu_mem_usage=True
+    ).cuda()
+    return model
+
+def load_llama():
+    """Load the LLaMA model."""
+    print('Loading LLaMA model...')
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
     
-    if use_ollama:
-        # Return an instance of OllamaWrapper
-        return moondream_model, OllamaWrapper()
-    else:
-        # Load HuggingFace LLaMA pipeline
-        llm_pipe = pipeline(
-            "text-generation",
-            model="meta-llama/Llama-3.2-1B-Instruct",
-            torch_dtype=torch.float16,
-            device_map="auto",
-            trust_remote_code=True
-        )
-        return moondream_model, llm_pipe
+    return pipeline(
+        "text-generation",
+        model="meta-llama/Llama-3.2-3B-Instruct",
+        torch_dtype=torch.bfloat16,
+        device_map="auto"
+    )
 
 def caption_frames(
     image_frames: list,
@@ -436,16 +270,114 @@ def analyze_scene_transition(caption1: str, caption2: str) -> tuple[bool, str]:
     
     return is_transition, ""
 
-def group_captions_into_segments(captions: list, frame_timestamps: list, llm_pipeline) -> list:
+def refine_captions(captions: List[str], llm_pipeline) -> str:
+    """Generate a flowing narrative from multiple captions of the same scene."""
+    # Format captions with timestamps for better context
+    formatted_captions = []
+    for i, caption in enumerate(captions):
+        formatted_captions.append(f"Frame {i+1}: {caption}")
+    
+    scene_description = "\n".join(formatted_captions)
+    
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a video editor describing a single scene from its frames. You only respond with the detailed description of the entire scene. Start your description with 'A' or 'The' and describe exactly what is happening in the scene from the frame descriptions. Provide 4-5 detailed sentences, focusing on aggregating details that are mentioned in the frame descriptions. Do not add any details that aren't directly stated. Return a single clear description. No extra text."
+        },
+        {
+            "role": "user", 
+            "content": f"These are descriptions of a single scene from different frames:\n\n{scene_description}\n\nProvide a clear description in 4-5 sentences that captures confidently what is happening in this scene. Infer and keep only the correct details. Do not add any details that aren't directly stated. Return a single assertive clear description. No extra text. No concluding sentence that starts with 'Overall ...' - only the very matter of fact scene description."
+        }
+    ]
+
+    # Generate caption using HuggingFace pipeline
+    outputs = llm_pipeline(
+        messages,
+        max_new_tokens=512,  # Increased token limit
+        do_sample=True,
+        temperature=0.05,  # Much lower temperature
+        top_p=0.1,  # Much more conservative top_p
+        repetition_penalty=1.2,
+        pad_token_id=2
+    )
+    return outputs[0]["generated_text"][-1]["content"].strip()
+
+def filter_scene_captions(captions: List[str], llm_pipeline) -> tuple[List[str], dict]:
+    """Filter scene captions to identify core recurring elements across frames."""
+    # Format captions with timestamps for better context
+    formatted_captions = []
+    for i, caption in enumerate(captions):
+        formatted_captions.append(f"Frame {i+1}: {caption}")
+    
+    scene_description = "\n".join(formatted_captions)
+    
+    messages = [
+        {
+            "role": "system",
+            "content": "You analyze multiple descriptions of the same scene and identify the core elements that appear consistently. Return only a JSON object with the key elements."
+        },
+        {
+            "role": "user", 
+            "content": f"""These are descriptions of the same scene from different frames:
+
+{scene_description}
+
+Return a JSON object with these fields:
+- main_subject: The primary subject/person/object that appears most consistently
+- action: The main action or activity that is described repeatedly
+- setting: The consistent location or setting mentioned
+- key_details: List of 2-3 other details that appear in multiple frames
+- visible_text: List of any text, words, numbers, or signs that appear in the scene repeatedly
+
+Return ONLY the JSON object, no other text."""
+        }
+    ]
+
+    # Generate analysis using HuggingFace pipeline
+    outputs = llm_pipeline(
+        messages,
+        max_new_tokens=256,
+        do_sample=True,
+        temperature=0.05,
+        top_p=0.1,
+        repetition_penalty=1.2,
+        pad_token_id=2
+    )
+    
+    # Get the raw JSON string
+    raw_json = outputs[0]["generated_text"][-1]["content"].strip()
+    
+    try:
+        # Try to parse the JSON response
+        analysis = json.loads(raw_json)
+        filtered_caption = f"A {analysis['main_subject']} {analysis['action']} in {analysis['setting']}. "
+        if analysis['key_details']:
+            filtered_caption += " ".join(analysis['key_details']) + "."
+        # Add any visible text
+        if analysis.get('visible_text') and analysis['visible_text']:
+            text_items = [f'"{text}"' for text in analysis['visible_text']]
+            filtered_caption += f" The text {text_items[0] if len(text_items) == 1 else ' and '.join(text_items)} is visible in the scene."
+    except:
+        # If parsing fails, use the raw JSON string
+        filtered_caption = raw_json
+        analysis = "JSON parsing failed, using raw output"
+    
+    return [filtered_caption], {
+        "raw_captions": captions,
+        "filtered_captions": [filtered_caption],
+        "analysis": analysis
+    }
+
+def group_captions_into_segments(captions: list, frame_timestamps: list, llm_pipeline, video_file: str) -> list:
     """Group captions into segments based on word differences between consecutive captions.
-    Uses the first frame's caption for each scene."""
+    Uses LLaMA to generate flowing narratives for each scene."""
     print("\nAnalyzing scene transitions...")
     segments = []
     current_segment = {
-        "captions": [captions[0]],  # We'll only use this first caption
+        "captions": [captions[0]],
         "start_time": frame_timestamps[0],
         "end_time": frame_timestamps[1] if len(frame_timestamps) > 1 else frame_timestamps[0],
-        "caption": captions[0]  # Use first frame's caption directly
+        "frame_indices": [0]  # Track frame indices
     }
     
     for i in range(1, len(captions)):
@@ -453,6 +385,18 @@ def group_captions_into_segments(captions: list, frame_timestamps: list, llm_pip
         is_transition, _ = analyze_scene_transition(captions[i-1], captions[i])
         
         if is_transition:
+            # Filter captions to remove hallucinations
+            print("\nFiltering scene captions...")
+            filtered_captions, analysis = filter_scene_captions(current_segment["captions"], llm_pipeline)
+            
+            # Generate refined caption for current segment using filtered captions
+            print("\nGenerating flowing narrative for scene...")
+            refined_caption = refine_captions(filtered_captions, llm_pipeline)
+            
+            # Store all information
+            current_segment["caption"] = refined_caption
+            current_segment["caption_analysis"] = analysis
+            
             # Add current segment
             segments.append(current_segment)
             
@@ -461,19 +405,29 @@ def group_captions_into_segments(captions: list, frame_timestamps: list, llm_pip
             print(f"Time: {current_segment['start_time']:.1f}s - {current_segment['end_time']:.1f}s")
             print(f"Caption: {current_segment['caption']}")
             
-            # Start new segment with first frame of new scene
+            # Start new segment
             current_segment = {
-                "captions": [captions[i]],  # We'll only use this first caption
+                "captions": [captions[i]],
                 "start_time": frame_timestamps[i],
                 "end_time": frame_timestamps[i+1] if i+1 < len(frame_timestamps) else frame_timestamps[-1],
-                "caption": captions[i]  # Use first frame's caption directly
+                "frame_indices": [i]
             }
         else:
-            # Just update end time of current segment
+            # Add caption to current segment
+            current_segment["captions"].append(captions[i])
+            current_segment["frame_indices"].append(i)
             current_segment["end_time"] = frame_timestamps[i+1] if i+1 < len(frame_timestamps) else frame_timestamps[-1]
     
-    # Add final segment
+    # Process final segment
+    print("\nFiltering final scene captions...")
+    filtered_captions, analysis = filter_scene_captions(current_segment["captions"], llm_pipeline)
+    
+    print("\nGenerating flowing narrative for final scene...")
+    refined_caption = refine_captions(filtered_captions, llm_pipeline)
+    current_segment["caption"] = refined_caption
+    current_segment["caption_analysis"] = analysis
     segments.append(current_segment)
+    
     print(f"\nFinal Scene:")
     print(f"Time: {current_segment['start_time']:.1f}s - {current_segment['end_time']:.1f}s")
     print(f"Caption: {current_segment['caption']}")
@@ -485,6 +439,57 @@ def group_captions_into_segments(captions: list, frame_timestamps: list, llm_pip
         print(f"\nScene {i}:")
         print(f"Time: {segment['start_time']:.1f}s - {segment['end_time']:.1f}s")
         print(f"Caption: {segment['caption']}")
+    
+    # Generate and save JSON output
+    json_output = {
+        "video_file": video_file,
+        "analysis_timestamp": datetime.now().isoformat(),
+        "total_scenes": len(segments),
+        "scenes": []
+    }
+    
+    for i, segment in enumerate(segments, 1):
+        scene_data = {
+            "scene_number": i,
+            "time_range": {
+                "start": f"{segment['start_time']:.1f}s",
+                "end": f"{segment['end_time']:.1f}s"
+            },
+            "final_caption": segment['caption'],
+            "caption_analysis": {
+                "recurring_elements": segment['caption_analysis']['analysis'],
+                "raw_captions": segment['caption_analysis']['raw_captions'],
+                "filtered_captions": segment['caption_analysis']['filtered_captions']
+            },
+            "frames": []
+        }
+        
+        for idx, (frame_idx, frame_caption) in enumerate(zip(segment['frame_indices'], segment['captions'])):
+            scene_data["frames"].append({
+                "frame_number": frame_idx,
+                "timestamp": f"{frame_timestamps[frame_idx]:.1f}s",
+                "original_caption": frame_caption
+            })
+        
+        json_output["scenes"].append(scene_data)
+    
+    # Create logs directory if it doesn't exist
+    os.makedirs("logs", exist_ok=True)
+    
+    # Normalize filename by removing extension and special characters
+    base_filename = os.path.splitext(video_file)[0]
+    normalized_filename = re.sub(r'[^\w\s-]', '', base_filename).strip().lower()
+    normalized_filename = re.sub(r'[-\s]+', '-', normalized_filename)
+    
+    # Create timestamped filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    json_filename = f"scene_analysis_{normalized_filename}_{timestamp}.json"
+    json_path = os.path.join("logs", json_filename)
+    
+    # Save JSON to file
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump(json_output, f, indent=2, ensure_ascii=False)
+    print(f"\nDetailed scene analysis saved to: {json_path}")
     
     return segments
 
@@ -546,7 +551,7 @@ def create_captioned_video(
 def main():
     parser = argparse.ArgumentParser(
         description='Video Captioning with Moondream',
-        epilog='If using HuggingFace LLaMA, authentication is required.'
+        epilog='HuggingFace authentication is required.'
     )
     parser.add_argument('--token', type=str, help='Optional: HuggingFace token for authentication')
     
@@ -555,7 +560,7 @@ def main():
     frame_group.add_argument(
         '--frame-interval', 
         type=float, 
-        default=1.0,
+        default=0.67,
         help='Extract one frame every N seconds (default: 1.0)'
     )
     frame_group.add_argument(
@@ -565,20 +570,11 @@ def main():
     )
     
     args = parser.parse_args()
-
     print("\nVideo Captioning with Moondream")
     print("===============================")
     
-    # Get model choice
-    model_choice = get_model_choice()
-    use_ollama = (model_choice == '1')
-    
-    # Setup authentication/Ollama
-    if use_ollama:
-        setup_ollama()
-    else:
-        setup_authentication(args.token)
-    
+    # Setup authentication
+    setup_authentication(args.token)
     # Get all video files from input folder
     print("\nChecking input folder...")
     os.makedirs(INPUT_FOLDER, exist_ok=True)
@@ -593,56 +589,93 @@ def main():
     # Process each video
     print(f"\nFound {len(video_files)} video(s) to process.")
     
+    # Clean up any existing frames
+    if os.path.exists(OUTPUT_FOLDER):
+        print("\nCleaning up existing frames...")
+        shutil.rmtree(OUTPUT_FOLDER)
+    
     for video_file in video_files:
-        video_path = os.path.join(INPUT_FOLDER, video_file)
-        print(f"\nProcessing video: {video_file}")
-        print("=" * (len(video_file) + 16))
+        try:
+            video_path = os.path.join(INPUT_FOLDER, video_file)
+            print(f"\nProcessing video: {video_file}")
+            print("=" * (len(video_file) + 16))
         
-        # 1. Extract frames
-        print("\n1. Extracting frames from video...")
-        output_folder, timestamps = extract_frames(
-            video_path,
-            frame_interval=args.frame_interval,
-            total_frames=args.total_frames
-        )
+            # 1. Extract frames
+            print("\n1. Extracting frames from video...")
+            output_folder, timestamps = extract_frames(
+                video_path,
+                frame_interval=args.frame_interval,
+                total_frames=args.total_frames
+            )
         
-        # 2. Load frames
-        print("\n2. Loading extracted frames...")
-        vidframes = [os.path.join(output_folder, path) for path in os.listdir(output_folder)]
-        vidframes.sort()  # Ensure frames are in order
-        image_frames = [Image.open(img) for img in vidframes]
+            # 2. Load frames
+            print("\n2. Loading extracted frames...")
+            vidframes = [os.path.join(output_folder, path) for path in os.listdir(output_folder)]
+            vidframes.sort()  # Ensure frames are in order
+            image_frames = [Image.open(img) for img in vidframes]
         
-        # 3. Load models
-        print("\n3. Loading AI models...")
-        print("   This may take a moment depending on your internet speed.")
-        moondream_model, llm_pipe = load_models(use_ollama)
+            # 3. Load Moondream and generate captions
+            print("\n3. Loading Moondream model...")
+            moondream_model = None
+            captions = []
+            try:
+                moondream_model = load_moondream()
+                print("\n4. Generating initial captions...")
+                captions = caption_frames(image_frames, moondream_model)
+            finally:
+                # Clean up Moondream
+                if moondream_model:
+                    del moondream_model
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    gc.collect()
+            
+            # 4. Load LLaMA and process scenes
+            print("\n5. Loading LLaMA model...")
+            llm_pipe = None
+            segments = []
+            try:
+                llm_pipe = load_llama()
+                print("\n6. Analyzing scenes and creating segments...")
+                segments = group_captions_into_segments(captions, timestamps, llm_pipe, video_file)
+            finally:
+                # Clean up LLaMA
+                if llm_pipe:
+                    del llm_pipe
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    gc.collect()
+            
+            # 5. Create final video
+            print("\n7. Creating final video...")
+            os.makedirs("outputs", exist_ok=True)
+            output_path = os.path.join("outputs", f"captioned_{video_file}")
+            create_captioned_video(
+                video_path,
+                output_path,
+                segments
+            )
+            
+            # Clean up frames
+            print("\nCleaning up temporary files...")
+            for frame in image_frames:
+                frame.close()
+            for frame_path in vidframes:
+                try:
+                    os.remove(frame_path)
+                except Exception as e:
+                    print(f"Warning: Could not remove {frame_path}: {e}")
+            
+            print("\nProcessing complete!")
+            
+        except Exception as e:
+            print(f"\nError processing {video_file}: {str(e)}")
+            continue
         
-        # 4. Generate initial captions
-        print("\n4. Generating initial captions...")
-        captions = caption_frames(image_frames, moondream_model)
-        
-        # 5. Analyze scenes and group into segments
-        print("\n5. Analyzing scenes and creating segments...")
-        segments = group_captions_into_segments(captions, timestamps, llm_pipe)
-        
-        # 6. Create final video with segmented captions
-        print("\n6. Creating final video...")
-        os.makedirs("outputs", exist_ok=True)
-        output_path = os.path.join("outputs", f"captioned_{video_file}")
-        create_captioned_video(
-            video_path,
-            output_path,
-            segments
-        )
-        
-        # Clean up frames
-        print("\nCleaning up temporary files...")
-        for frame in image_frames:
-            frame.close()
-        for frame_path in vidframes:
-            os.remove(frame_path)
-        
-        print("\nProcessing complete!")
+        finally:
+            # Final cleanup
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
 if __name__ == "__main__":
     main()
