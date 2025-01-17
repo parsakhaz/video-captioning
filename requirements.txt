@@ -1,9 +1,9 @@
-opencv-python
-Pillow
-transformers
-torch
+opencv-python>=4.8.0
+Pillow>=10.0.0
+transformers>=4.36.0
+torch>=2.0.0
 einops
 pyvips
 typing
 ollama
-accelerate
+accelerate>=0.26.0
